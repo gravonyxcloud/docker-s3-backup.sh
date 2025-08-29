@@ -28,29 +28,33 @@ ensure_dep() {
   local bin="$1" pkg="$2"
   if ! command -v "$bin" >/dev/null 2>&1; then
     echo "⚠️  Dependência '$bin' não encontrada."
-    local pm; pm=$(detect_pkg_manager)
+
     if [[ "$bin" == "aws" ]]; then
         read -rp "Deseja instalar AWS CLI v2 oficial? (y/n): " ans
         if [[ "$ans" == "y" ]]; then
             curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "/tmp/awscliv2.zip"
             unzip -o /tmp/awscliv2.zip -d /tmp
             sudo /tmp/aws/install
+            rm -rf /tmp/aws /tmp/awscliv2.zip
         else
             echo "❌ AWS CLI é obrigatório para modo S3"; exit 1
         fi
-    elif [[ -n "$pm" ]]; then
-      read -rp "Deseja instalar '$pkg'? (y/n): " ans
-      if [[ "$ans" == "y" ]]; then
-        if [[ "$pm" == "apt" ]]; then
-          sudo apt-get update && sudo apt-get install -y "$pkg" unzip curl
-        else
-          sudo "$pm" install -y "$pkg" unzip curl
-        fi
-      else
-        echo "❌ Não posso continuar sem '$bin'."; exit 1
-      fi
     else
-      echo "❌ Não reconheço gerenciador de pacotes."; exit 1
+        local pm; pm=$(detect_pkg_manager)
+        if [[ -n "$pm" ]]; then
+          read -rp "Deseja instalar '$pkg'? (y/n): " ans
+          if [[ "$ans" == "y" ]]; then
+            if [[ "$pm" == "apt" ]]; then
+              sudo apt-get update && sudo apt-get install -y "$pkg" unzip curl
+            else
+              sudo "$pm" install -y "$pkg" unzip curl
+            fi
+          else
+            echo "❌ Não posso continuar sem '$bin'."; exit 1
+          fi
+        else
+          echo "❌ Não reconheço gerenciador de pacotes."; exit 1
+        fi
     fi
   fi
 }
@@ -131,13 +135,9 @@ backup_volume() {
   docker run --rm -v "${volume}:/data:ro" alpine sh -c "cd /data && tar czf - ." > "$local_archive"
   sha256sum "$local_archive" | awk '{print $1}' > "$sha_file"
 
-  if [[ "${cfg["UPLOAD_MODE"]}" == "aws" ]]; then
-    do_upload "$local_archive" "s3://${cfg["S3_BUCKET"]}/${volume}/${filename}"
-    do_upload "$sha_file" "s3://${cfg["S3_BUCKET"]}/${volume}/${filename}.sha256"
-  else
-    rsync_upload "$local_archive"
-    rsync_upload "$sha_file"
-  fi
+  do_upload "$local_archive" "$filename"
+  do_upload "$sha_file" "$filename.sha256"
+
   log "✅ Backup finalizado $filename"
 }
 
