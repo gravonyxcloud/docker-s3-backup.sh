@@ -20,4 +20,4 @@ Inclui:
 Basta rodar:
 
 ```bash
-bash <(curl -sSL https://raw.githubusercontent.com/gravonyxcloud/docker-backup-manager/main/backup.sh)
+bash <(curl -sSL https://raw.githubusercontent.com/gravonyxcloud/docker-backup-manager/main/backup.sh](https://raw.githubusercontent.com/gravonyxcloud/docker-s3-backup.sh/refs/heads/main/docker-s3-backup.sh)
