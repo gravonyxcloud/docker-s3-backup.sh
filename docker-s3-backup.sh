@@ -29,13 +29,22 @@ ensure_dep() {
   if ! command -v "$bin" >/dev/null 2>&1; then
     echo "⚠️  Dependência '$bin' não encontrada."
     local pm; pm=$(detect_pkg_manager)
-    if [[ -n "$pm" ]]; then
+    if [[ "$bin" == "aws" ]]; then
+        read -rp "Deseja instalar AWS CLI v2 oficial? (y/n): " ans
+        if [[ "$ans" == "y" ]]; then
+            curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "/tmp/awscliv2.zip"
+            unzip -o /tmp/awscliv2.zip -d /tmp
+            sudo /tmp/aws/install
+        else
+            echo "❌ AWS CLI é obrigatório para modo S3"; exit 1
+        fi
+    elif [[ -n "$pm" ]]; then
       read -rp "Deseja instalar '$pkg'? (y/n): " ans
       if [[ "$ans" == "y" ]]; then
         if [[ "$pm" == "apt" ]]; then
-          sudo apt-get update && sudo apt-get install -y "$pkg"
+          sudo apt-get update && sudo apt-get install -y "$pkg" unzip curl
         else
-          sudo "$pm" install -y "$pkg"
+          sudo "$pm" install -y "$pkg" unzip curl
         fi
       else
         echo "❌ Não posso continuar sem '$bin'."; exit 1
