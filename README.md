@@ -1,15 +1,23 @@
-# Docker S3 Backup
+# 🐳 Docker Backup Manager
 
-Script em **Bash** para fazer **backup e restore de volumes Docker** para:
+Script **100% automatizado e interativo** para backup e restauração de volumes do Docker, com suporte a:
 
-- **Amazon S3 / S3 compatível** (`aws cli`)  
-- **Servidor remoto via SSH/rsync**
+- ☁️ **Amazon S3 / S3 compatível** (via `aws-cli`)
+- 🔄 **Servidor remoto via SSH** (via `rsync`)
+
+Inclui:
+- 🔎 Detecção de dependências (docker, tar, flock, awscli, rsync…)
+- ⚡ Pergunta antes de instalar pacotes automaticamente
+- 🔐 Geração e validação de checksums (`sha256sum`)
+- 📦 Backup completo ou por volume específico
+- 🔄 Restauração interativa de backups
+- 📜 Listagem de backups já existentes
 
 ---
 
 ## 🚀 Instalação
 
+Basta rodar:
+
 ```bash
-git clone https://github.com/gravonyxcloud/docker-s3-backup.git
-cd docker-s3-backup
-chmod +x docker-s3-backup.sh
+bash <(curl -sSL https://raw.githubusercontent.com/SEU_USUARIO/docker-backup-manager/main/backup.sh)
