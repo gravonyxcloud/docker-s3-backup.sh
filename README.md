@@ -20,4 +20,5 @@ Inclui:
 Basta rodar:
 
 ```bash
-bash <(curl -sSL https://raw.githubusercontent.com/gravonyxcloud/docker-s3-backup.sh/refs/heads/main/docker-s3-backup.sh)
+curl -sSL https://raw.githubusercontent.com/gravonyxcloud/docker-s3-backup.sh/refs/heads/main/docker-s3-backup.sh -o ~/docker-s3-backup.sh
+chmod +x ~/docker-s3-backup.sh
