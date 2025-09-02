@@ -2,8 +2,21 @@
 set -euo pipefail
 
 CONFIG_FILE="$HOME/.docker-s3-backup.conf"
-BACKUP_DIR="$HOME/docker_backups"
 AWS_BIN="/usr/local/bin/aws"
+
+banner() {
+cat <<'EOF'
+██████╗  ██████╗  ██████╗██╗  ██╗███████╗██████╗ 
+██╔══██╗██╔═══██╗██╔════╝██║ ██╔╝██╔════╝██╔══██╗
+██████╔╝██║   ██║██║     █████╔╝ █████╗  ██████╔╝
+██╔═══╝ ██║   ██║██║     ██╔═██╗ ██╔══╝  ██╔═══╝ 
+██║     ╚██████╔╝╚██████╗██║  ██╗███████╗██║     
+╚═╝      ╚═════╝  ╚═════╝╚═╝  ╚═╝╚══════╝╚═╝     
+                                                 
+EOF
+echo "🚀 Docker Volume Backup para S3"
+echo "====================================="
+}
 
 # Função para instalar dependências
 install_deps() {
@@ -14,139 +27,131 @@ install_deps() {
     fi
   done
 
-  if ! command -v $AWS_BIN >/dev/null 2>&1; then
-    echo "⚠️ Dependência 'awscli' não encontrada."
-    read -p "Deseja instalar AWS CLI v2? (y/n): " yn
-    if [[ "$yn" =~ ^[Yy]$ ]]; then
-      curl -sSL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "/tmp/awscliv2.zip"
-      unzip -qo /tmp/awscliv2.zip -d /tmp
-      /tmp/aws/install -i /usr/local/aws -b /usr/local/bin
-      rm -rf /tmp/aws /tmp/awscliv2.zip
-      echo "✅ AWS CLI instalado em $AWS_BIN"
+  if ! command -v unzip >/dev/null 2>&1; then
+    echo "📦 Instalando unzip..."
+    if command -v apt >/dev/null 2>&1; then
+      apt update -y && apt install -y unzip
+    elif command -v yum >/dev/null 2>&1; then
+      yum install -y unzip
     else
-      echo "❌ Não é possível continuar sem AWS CLI."
+      echo "❌ Não foi possível instalar unzip automaticamente."
       exit 1
     fi
   fi
-}
 
-# Função para salvar configuração
-save_config() {
-  mkdir -p "$BACKUP_DIR"
-  cat > "$CONFIG_FILE" <<EOF
-S3_BUCKET="$S3_BUCKET"
-S3_PREFIX="$S3_PREFIX"
-AWS_ACCESS_KEY_ID="$AWS_ACCESS_KEY_ID"
-AWS_SECRET_ACCESS_KEY="$AWS_SECRET_ACCESS_KEY"
-AWS_DEFAULT_REGION="$AWS_DEFAULT_REGION"
-EOF
-  chmod 600 "$CONFIG_FILE"
-}
-
-# Função para carregar configuração
-load_config() {
-  if [[ -f "$CONFIG_FILE" ]]; then
-    source "$CONFIG_FILE"
-  else
-    configure
+  if ! command -v $AWS_BIN >/dev/null 2>&1; then
+    echo "⚠️ AWS CLI não encontrada. Instalando..."
+    curl -sSL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "/tmp/awscliv2.zip"
+    unzip -qo /tmp/awscliv2.zip -d /tmp
+    /tmp/aws/install -i /usr/local/aws -b /usr/local/bin
+    rm -rf /tmp/aws /tmp/awscliv2.zip
+    echo "✅ AWS CLI instalada em $AWS_BIN"
   fi
 }
 
-# Função de configuração inicial
-configure() {
-  echo "=== Configuração do destino S3 ==="
-  read -p "Bucket S3: " S3_BUCKET
-  read -p "Prefixo (pasta) no bucket: " S3_PREFIX
-  read -p "AWS Access Key: " AWS_ACCESS_KEY_ID
-  read -p "AWS Secret Key: " AWS_SECRET_ACCESS_KEY
-  read -p "AWS Region [us-east-1]: " AWS_DEFAULT_REGION
-  AWS_DEFAULT_REGION=${AWS_DEFAULT_REGION:-us-east-1}
-  save_config
+# Configuração inicial
+setup_config() {
+  echo "🔧 Configuração do destino S3"
+  read -rp "Bucket S3: " S3_BUCKET
+  read -rp "Região AWS: " AWS_REGION
+  read -rp "Access Key ID: " AWS_ACCESS_KEY_ID
+  read -rp "Secret Access Key: " AWS_SECRET_ACCESS_KEY
+
+  cat > "$CONFIG_FILE" <<EOF
+S3_BUCKET=$S3_BUCKET
+AWS_REGION=$AWS_REGION
+AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID
+AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY
+EOF
+
   echo "✅ Configuração salva em $CONFIG_FILE"
 }
 
-# Backup de todos os volumes
-backup_all() {
-  load_config
-  for vol in $(docker volume ls -q); do
-    backup_volume "$vol"
-  done
+# Carregar config
+load_config() {
+  if [[ ! -f $CONFIG_FILE ]]; then
+    setup_config
+  fi
+  source "$CONFIG_FILE"
+  export AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_REGION
 }
 
-# Backup de volume específico
+# Backup de volume
 backup_volume() {
-  load_config
-  local VOL="$1"
-  local TS
-  TS=$(date +%Y%m%d-%H%M%S)
-  local FILE="$BACKUP_DIR/${VOL}_${TS}.tar.gz"
+  local VOL=$1
+  local TS=$(date +"%Y%m%d-%H%M%S")
+  local FILE="/tmp/${VOL}_${TS}.tar.gz"
 
-  echo "📦 Fazendo backup do volume $VOL..."
-  docker run --rm -v "$VOL":/data -v "$BACKUP_DIR":/backup alpine \
-    tar czf "/backup/${VOL}_${TS}.tar.gz" -C /data .
+  echo "📦 Criando backup de $VOL..."
+  docker run --rm -v "$VOL":/volume -v /tmp:/backup alpine \
+    sh -c "cd /volume && tar czf /backup/${VOL}_${TS}.tar.gz ."
 
-  sha256sum "$FILE" > "$FILE.sha256"
-  AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY \
-    AWS_DEFAULT_REGION=$AWS_DEFAULT_REGION $AWS_BIN s3 cp "$FILE" "s3://$S3_BUCKET/$S3_PREFIX/"
-  AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY \
-    AWS_DEFAULT_REGION=$AWS_DEFAULT_REGION $AWS_BIN s3 cp "$FILE.sha256" "s3://$S3_BUCKET/$S3_PREFIX/"
+  echo "⬆️ Enviando para S3..."
+  $AWS_BIN s3 cp "$FILE" "s3://$S3_BUCKET/$VOL/$VOL-$TS.tar.gz"
 
-  echo "✅ Backup concluído: $FILE"
+  rm -f "$FILE"
+  echo "✅ Backup de $VOL concluído!"
 }
 
 # Restaurar volume
 restore_volume() {
-  load_config
-  read -p "Nome do volume: " VOL
-  read -p "Timestamp (ex: 20240902-120000): " TS
-  local FILE="$BACKUP_DIR/${VOL}_${TS}.tar.gz"
+  local VOL=$1
+  local TS=$2
+  local FILE="/tmp/${VOL}_${TS}.tar.gz"
 
   echo "⬇️ Baixando backup do S3..."
-  AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY \
-    AWS_DEFAULT_REGION=$AWS_DEFAULT_REGION $AWS_BIN s3 cp "s3://$S3_BUCKET/$S3_PREFIX/${VOL}_${TS}.tar.gz" "$FILE"
+  $AWS_BIN s3 cp "s3://$S3_BUCKET/$VOL/$VOL-$TS.tar.gz" "$FILE"
 
+  echo "📂 Restaurando volume $VOL..."
   docker volume create "$VOL" >/dev/null 2>&1 || true
-  docker run --rm -v "$VOL":/data -v "$BACKUP_DIR":/backup alpine \
-    sh -c "cd /data && tar xzf /backup/${VOL}_${TS}.tar.gz"
-  echo "✅ Volume $VOL restaurado."
-}
+  docker run --rm -v "$VOL":/volume -v /tmp:/backup alpine \
+    sh -c "cd /volume && tar xzf /backup/${VOL}_${TS}.tar.gz"
 
-# Listar backups no S3
-list_backups() {
-  load_config
-  AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY \
-    AWS_DEFAULT_REGION=$AWS_DEFAULT_REGION $AWS_BIN s3 ls "s3://$S3_BUCKET/$S3_PREFIX/"
+  rm -f "$FILE"
+  echo "✅ Volume $VOL restaurado!"
 }
 
 # Menu interativo
 menu() {
-  while true; do
-    clear
-    echo "=========================================="
-    echo "     Docker Backup & Restore - v1.0"
-    echo "=========================================="
-    echo "[1] Configurar destino"
-    echo "[2] Backup de todos os volumes"
-    echo "[3] Backup de volume específico"
-    echo "[4] Restaurar volume"
-    echo "[5] Listar backups"
-    echo "[0] Sair"
-    echo "------------------------------------------"
-    read -p "Escolha uma opção: " OP
-    case "$OP" in
-      1) configure ;;
-      2) backup_all ;;
-      3) read -p "Nome do volume: " VOL; backup_volume "$VOL" ;;
-      4) restore_volume ;;
-      5) list_backups ;;
-      0) exit 0 ;;
-      *) echo "❌ Opção inválida"; sleep 1 ;;
-    esac
-    read -p "Pressione ENTER para continuar..."
-  done
+  echo ""
+  echo "[1] Backup de TODOS volumes"
+  echo "[2] Backup de um volume específico"
+  echo "[3] Restaurar um volume"
+  echo "[4] Reconfigurar destino S3"
+  echo "[0] Sair"
+  echo ""
+  read -rp "Escolha uma opção: " OPT
+
+  case $OPT in
+    1)
+      for v in $(docker volume ls -q); do
+        backup_volume "$v"
+      done
+      ;;
+    2)
+      docker volume ls
+      read -rp "Nome do volume: " VOL
+      backup_volume "$VOL"
+      ;;
+    3)
+      read -rp "Nome do volume: " VOL
+      read -rp "Timestamp (ex: 20240901-123456): " TS
+      restore_volume "$VOL" "$TS"
+      ;;
+    4)
+      setup_config
+      ;;
+    0)
+      exit 0
+      ;;
+    *)
+      echo "❌ Opção inválida."
+      ;;
+  esac
 }
 
-### Execução principal ###
+### Fluxo principal
+banner
 install_deps
 load_config
 menu
