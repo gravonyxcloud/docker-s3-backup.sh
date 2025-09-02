@@ -1,228 +1,152 @@
 #!/usr/bin/env bash
-# docker-s3-backup.sh
-# Backup e Restore de volumes Docker para S3 ou servidor remoto via rsync
-# Author: Biel + ChatGPT
-# License: MIT
-
 set -euo pipefail
-IFS=$'\n\t'
 
-CONFIG_FILE="${HOME}/.docker-s3-backup.conf"
-WORKDIR="${HOME}/.docker-s3-backup"
-TMPDIR="${WORKDIR}/tmp"
-LOGFILE="${WORKDIR}/backup.log"
-LOCKFILE="/var/lock/docker-s3-backup.lock"
+CONFIG_FILE="$HOME/.docker-s3-backup.conf"
+BACKUP_DIR="$HOME/docker_backups"
+AWS_BIN="/usr/local/bin/aws"
 
-# ---------------- Utils ----------------
-timestamp() { date +"%Y%m%dT%H%M%S"; }
-log() { echo "[$(date +"%Y-%m-%d %H:%M:%S")] $*" | tee -a "$LOGFILE"; }
+# Função para instalar dependências
+install_deps() {
+  for cmd in docker tar flock sha256sum; do
+    if ! command -v $cmd >/dev/null 2>&1; then
+      echo "⚠️ Dependência '$cmd' não encontrada. Instale manualmente."
+      exit 1
+    fi
+  done
 
-detect_pkg_manager() {
-  if command -v apt-get >/dev/null 2>&1; then echo "apt"
-  elif command -v dnf >/dev/null 2>&1; then echo "dnf"
-  elif command -v yum >/dev/null 2>&1; then echo "yum"
-  else echo ""; fi
-}
-
-ensure_dep() {
-  local bin="$1" pkg="$2"
-  if ! command -v "$bin" >/dev/null 2>&1; then
-    echo "⚠️  Dependência '$bin' não encontrada."
-
-    if [[ "$bin" == "aws" ]]; then
-        read -rp "Deseja instalar AWS CLI v2 oficial? (y/n): " ans
-        if [[ "$ans" == "y" ]]; then
-            curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "/tmp/awscliv2.zip"
-            unzip -o /tmp/awscliv2.zip -d /tmp
-            sudo /tmp/aws/install
-            rm -rf /tmp/aws /tmp/awscliv2.zip
-        else
-            echo "❌ AWS CLI é obrigatório para modo S3"; exit 1
-        fi
+  if ! command -v $AWS_BIN >/dev/null 2>&1; then
+    echo "⚠️ Dependência 'awscli' não encontrada."
+    read -p "Deseja instalar AWS CLI v2? (y/n): " yn
+    if [[ "$yn" =~ ^[Yy]$ ]]; then
+      curl -sSL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "/tmp/awscliv2.zip"
+      unzip -qo /tmp/awscliv2.zip -d /tmp
+      /tmp/aws/install -i /usr/local/aws -b /usr/local/bin
+      rm -rf /tmp/aws /tmp/awscliv2.zip
+      echo "✅ AWS CLI instalado em $AWS_BIN"
     else
-        local pm; pm=$(detect_pkg_manager)
-        if [[ -n "$pm" ]]; then
-          read -rp "Deseja instalar '$pkg'? (y/n): " ans
-          if [[ "$ans" == "y" ]]; then
-            if [[ "$pm" == "apt" ]]; then
-              sudo apt-get update && sudo apt-get install -y "$pkg" unzip curl
-            else
-              sudo "$pm" install -y "$pkg" unzip curl
-            fi
-          else
-            echo "❌ Não posso continuar sem '$bin'."; exit 1
-          fi
-        else
-          echo "❌ Não reconheço gerenciador de pacotes."; exit 1
-        fi
+      echo "❌ Não é possível continuar sem AWS CLI."
+      exit 1
     fi
   fi
 }
 
-ensure_dirs() {
-  mkdir -p "$WORKDIR" "$TMPDIR"
-  touch "$LOGFILE"
-}
-
-# ---------------- Config ----------------
-declare -A cfg
-load_config() {
-  if [[ -f "$CONFIG_FILE" ]]; then
-    while IFS='=' read -r k v; do
-      [[ -z "$k" ]] && continue
-      cfg["$k"]="${v}"
-    done < <(sed -E '/^\s*#/d;/^\s*$/d' "$CONFIG_FILE")
-  fi
-  cfg["UPLOAD_MODE"]="${cfg["UPLOAD_MODE"]:-aws}"
-  cfg["S3_BUCKET"]="${cfg["S3_BUCKET"]:-}"
-  cfg["S3_REGION"]="${cfg["S3_REGION"]:-us-east-1}"
-  cfg["LOCAL_RETENTION"]="${cfg["LOCAL_RETENTION"]:-3}"
-  cfg["RSYNC_USER"]="${cfg["RSYNC_USER"]:-}"
-  cfg["RSYNC_HOST"]="${cfg["RSYNC_HOST"]:-}"
-  cfg["RSYNC_PATH"]="${cfg["RSYNC_PATH"]:-/backups}"
-}
-
+# Função para salvar configuração
 save_config() {
-  mkdir -p "$(dirname "$CONFIG_FILE")"
+  mkdir -p "$BACKUP_DIR"
   cat > "$CONFIG_FILE" <<EOF
-UPLOAD_MODE=${cfg["UPLOAD_MODE"]}
-S3_BUCKET=${cfg["S3_BUCKET"]}
-S3_REGION=${cfg["S3_REGION"]}
-LOCAL_RETENTION=${cfg["LOCAL_RETENTION"]}
-RSYNC_USER=${cfg["RSYNC_USER"]}
-RSYNC_HOST=${cfg["RSYNC_HOST"]}
-RSYNC_PATH=${cfg["RSYNC_PATH"]}
+S3_BUCKET="$S3_BUCKET"
+S3_PREFIX="$S3_PREFIX"
+AWS_ACCESS_KEY_ID="$AWS_ACCESS_KEY_ID"
+AWS_SECRET_ACCESS_KEY="$AWS_SECRET_ACCESS_KEY"
+AWS_DEFAULT_REGION="$AWS_DEFAULT_REGION"
 EOF
   chmod 600 "$CONFIG_FILE"
-  log "Config salva em $CONFIG_FILE"
 }
 
-# ---------------- Upload ----------------
-aws_upload() {
-  local src="$1" dest="$2"
-  aws s3 cp "$src" "$dest" --region "${cfg["S3_REGION"]}"
-}
-
-rsync_upload() {
-  local src="$1"
-  local dest="${cfg["RSYNC_USER"]}@${cfg["RSYNC_HOST"]}:${cfg["RSYNC_PATH"]}/$(basename "$src")"
-  rsync -avz "$src" "$dest"
-}
-
-do_upload() {
-  local src="$1" dest="$2"
-  if [[ "${cfg["UPLOAD_MODE"]}" == "aws" ]]; then
-    aws_upload "$src" "$dest"
+# Função para carregar configuração
+load_config() {
+  if [[ -f "$CONFIG_FILE" ]]; then
+    source "$CONFIG_FILE"
   else
-    rsync_upload "$src"
+    configure
   fi
 }
 
-# ---------------- Backup ----------------
-list_volumes() {
-  docker volume ls --format '{{.Name}}'
+# Função de configuração inicial
+configure() {
+  echo "=== Configuração do destino S3 ==="
+  read -p "Bucket S3: " S3_BUCKET
+  read -p "Prefixo (pasta) no bucket: " S3_PREFIX
+  read -p "AWS Access Key: " AWS_ACCESS_KEY_ID
+  read -p "AWS Secret Key: " AWS_SECRET_ACCESS_KEY
+  read -p "AWS Region [us-east-1]: " AWS_DEFAULT_REGION
+  AWS_DEFAULT_REGION=${AWS_DEFAULT_REGION:-us-east-1}
+  save_config
+  echo "✅ Configuração salva em $CONFIG_FILE"
 }
 
-backup_volume() {
-  local volume="$1"
-  local ts filename local_archive sha_file
-  ts="$(timestamp)"
-  filename="${volume}_${ts}.tar.gz"
-  local_archive="${WORKDIR}/${filename}"
-  sha_file="${local_archive}.sha256"
-
-  log "📦 Backup volume $volume"
-  docker run --rm -v "${volume}:/data:ro" alpine sh -c "cd /data && tar czf - ." > "$local_archive"
-  sha256sum "$local_archive" | awk '{print $1}' > "$sha_file"
-
-  do_upload "$local_archive" "$filename"
-  do_upload "$sha_file" "$filename.sha256"
-
-  log "✅ Backup finalizado $filename"
-}
-
-cmd_backup_all() {
-  for v in $(list_volumes); do
-    backup_volume "$v"
+# Backup de todos os volumes
+backup_all() {
+  load_config
+  for vol in $(docker volume ls -q); do
+    backup_volume "$vol"
   done
 }
 
-# ---------------- Restore ----------------
-cmd_restore() {
-  local volume="$1" stamp="$2"
-  if [[ -z "$volume" || -z "$stamp" ]]; then
-    echo "Uso: restore <volume> <timestamp>"; exit 1
-  fi
-  local filename="${volume}_${stamp}.tar.gz"
-  local tmp_dl="${TMPDIR}/${filename}"
-
-  if [[ "${cfg["UPLOAD_MODE"]}" == "aws" ]]; then
-    aws s3 cp "s3://${cfg["S3_BUCKET"]}/${volume}/${filename}" "$tmp_dl" --region "${cfg["S3_REGION"]}"
-  else
-    rsync "${cfg["RSYNC_USER"]}@${cfg["RSYNC_HOST"]}:${cfg["RSYNC_PATH"]}/${filename}" "$tmp_dl"
-  fi
-
-  docker volume inspect "$volume" >/dev/null 2>&1 || docker volume create "$volume"
-  docker run --rm -i -v "${volume}:/data" alpine sh -c "cd /data && tar xz" < "$tmp_dl"
-  log "♻️  Restore concluído para volume $volume"
-}
-
-# ---------------- Config interactive ----------------
-cmd_config() {
+# Backup de volume específico
+backup_volume() {
   load_config
-  echo "=== Configuração ==="
-  read -rp "Método de upload (aws|rsync) [${cfg["UPLOAD_MODE"]}]: " in
-  [[ -n "$in" ]] && cfg["UPLOAD_MODE"]="$in"
-  if [[ "${cfg["UPLOAD_MODE"]}" == "aws" ]]; then
-    read -rp "S3 Bucket [${cfg["S3_BUCKET"]}]: " in
-    [[ -n "$in" ]] && cfg["S3_BUCKET"]="$in"
-    read -rp "S3 Região [${cfg["S3_REGION"]}]: " in
-    [[ -n "$in" ]] && cfg["S3_REGION"]="$in"
-  else
-    read -rp "Usuário SSH [${cfg["RSYNC_USER"]}]: " in
-    [[ -n "$in" ]] && cfg["RSYNC_USER"]="$in"
-    read -rp "Host SSH [${cfg["RSYNC_HOST"]}]: " in
-    [[ -n "$in" ]] && cfg["RSYNC_HOST"]="$in"
-    read -rp "Diretório remoto [${cfg["RSYNC_PATH"]}]: " in
-    [[ -n "$in" ]] && cfg["RSYNC_PATH"]="$in"
-  fi
-  save_config
+  local VOL="$1"
+  local TS
+  TS=$(date +%Y%m%d-%H%M%S)
+  local FILE="$BACKUP_DIR/${VOL}_${TS}.tar.gz"
+
+  echo "📦 Fazendo backup do volume $VOL..."
+  docker run --rm -v "$VOL":/data -v "$BACKUP_DIR":/backup alpine \
+    tar czf "/backup/${VOL}_${TS}.tar.gz" -C /data .
+
+  sha256sum "$FILE" > "$FILE.sha256"
+  AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY \
+    AWS_DEFAULT_REGION=$AWS_DEFAULT_REGION $AWS_BIN s3 cp "$FILE" "s3://$S3_BUCKET/$S3_PREFIX/"
+  AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY \
+    AWS_DEFAULT_REGION=$AWS_DEFAULT_REGION $AWS_BIN s3 cp "$FILE.sha256" "s3://$S3_BUCKET/$S3_PREFIX/"
+
+  echo "✅ Backup concluído: $FILE"
 }
 
-# ---------------- CLI ----------------
-cmd_help() {
-cat <<EOF
-Uso: $0 <comando>
-
-Comandos:
-  config       - configurar destino de backup
-  backup       - backup de todos volumes Docker
-  backup <vol> - backup de um volume específico
-  restore VOL TIMESTAMP - restaurar volume
-  help         - mostrar ajuda
-EOF
-}
-
-main() {
-  ensure_dirs
+# Restaurar volume
+restore_volume() {
   load_config
-  ensure_dep docker docker.io
-  ensure_dep tar tar
-  ensure_dep flock util-linux
-  ensure_dep sha256sum coreutils
-  if [[ "${cfg["UPLOAD_MODE"]}" == "aws" ]]; then
-    ensure_dep aws awscli
-  else
-    ensure_dep rsync rsync
-  fi
+  read -p "Nome do volume: " VOL
+  read -p "Timestamp (ex: 20240902-120000): " TS
+  local FILE="$BACKUP_DIR/${VOL}_${TS}.tar.gz"
 
-  case "${1:-help}" in
-    config) cmd_config ;;
-    backup)
-      if [[ -n "${2:-}" ]]; then backup_volume "$2"; else cmd_backup_all; fi ;;
-    restore) shift; cmd_restore "$@" ;;
-    help|*) cmd_help ;;
-  esac
+  echo "⬇️ Baixando backup do S3..."
+  AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY \
+    AWS_DEFAULT_REGION=$AWS_DEFAULT_REGION $AWS_BIN s3 cp "s3://$S3_BUCKET/$S3_PREFIX/${VOL}_${TS}.tar.gz" "$FILE"
+
+  docker volume create "$VOL" >/dev/null 2>&1 || true
+  docker run --rm -v "$VOL":/data -v "$BACKUP_DIR":/backup alpine \
+    sh -c "cd /data && tar xzf /backup/${VOL}_${TS}.tar.gz"
+  echo "✅ Volume $VOL restaurado."
 }
 
-main "$@"
+# Listar backups no S3
+list_backups() {
+  load_config
+  AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY \
+    AWS_DEFAULT_REGION=$AWS_DEFAULT_REGION $AWS_BIN s3 ls "s3://$S3_BUCKET/$S3_PREFIX/"
+}
+
+# Menu interativo
+menu() {
+  while true; do
+    clear
+    echo "=========================================="
+    echo "     Docker Backup & Restore - v1.0"
+    echo "=========================================="
+    echo "[1] Configurar destino"
+    echo "[2] Backup de todos os volumes"
+    echo "[3] Backup de volume específico"
+    echo "[4] Restaurar volume"
+    echo "[5] Listar backups"
+    echo "[0] Sair"
+    echo "------------------------------------------"
+    read -p "Escolha uma opção: " OP
+    case "$OP" in
+      1) configure ;;
+      2) backup_all ;;
+      3) read -p "Nome do volume: " VOL; backup_volume "$VOL" ;;
+      4) restore_volume ;;
+      5) list_backups ;;
+      0) exit 0 ;;
+      *) echo "❌ Opção inválida"; sleep 1 ;;
+    esac
+    read -p "Pressione ENTER para continuar..."
+  done
+}
+
+### Execução principal ###
+install_deps
+load_config
+menu
